@@ -62,11 +62,12 @@ canvas{width:100%;display:block;touch-action:pan-y}
 <script>
 'use strict';
 // ★ Dropbox App Console の「App key」に書き換える
-const APP_KEY = '0xfisab2ur4fodq';
+const APP_KEY = 'ここにApp keyを入れる';
 const WORKER = 'https://fit-viewer-auth.youm00.workers.dev';
 const REDIRECT = 'https://youm00.github.io/google-fit-viewer/';
 const DPATH = '/daily.json';
-const LS = {a: 'fitdbx_access', r: 'fitdbx_refresh', x: 'fitdbx_expiry', c: 'fit_daily_cache'};
+const HPATH = '/history.json';   // Google Takeout から作った過去データ(任意)
+const LS = {a: 'fitdbx_access', r: 'fitdbx_refresh', x: 'fitdbx_expiry', c: 'fit_daily_cache', h: 'fit_hist_cache'};
 const $ = id => document.getElementById(id);
 const WK = ['日', '月', '火', '水', '木', '金', '土'];
 const DAY = 86400000;
@@ -99,7 +100,7 @@ async function exchange(code) {
   saveTok(r.d);
 }
 function logout() {
-  [LS.a, LS.r, LS.x, LS.c].forEach(k => localStorage.removeItem(k));
+  [LS.a, LS.r, LS.x, LS.c, LS.h].forEach(k => localStorage.removeItem(k));
   rows = []; showLogin();
 }
 async function token(force) {
@@ -115,14 +116,17 @@ async function token(force) {
   saveTok(r.d, true);
   return r.d.access_token;
 }
-async function download() {
+async function download(path) {
   for (let i = 0; i < 2; i++) {
     const t = await token(i === 1);
     if (!t) throw new Error('ログインが必要です');
     const r = await fetch('https://content.dropboxapi.com/2/files/download', {
-      method: 'POST', headers: {Authorization: 'Bearer ' + t, 'Dropbox-API-Arg': JSON.stringify({path: DPATH})}});
+      method: 'POST', headers: {Authorization: 'Bearer ' + t, 'Dropbox-API-Arg': JSON.stringify({path})}});
     if (r.status === 401 && i === 0) continue;
-    if (r.status === 409) throw new Error('daily.json がまだありません。Android アプリで送信してください');
+    if (r.status === 409) {
+      if (path !== DPATH) return null;   // 過去データのファイルは無くてもよい
+      throw new Error('daily.json がまだありません。Android アプリで送信してください');
+    }
     if (!r.ok) throw new Error('取得に失敗(' + r.status + ')');
     return await r.text();
   }
@@ -134,10 +138,20 @@ let updated = '';
 const S = {tab: 'list', metric: 'steps', days: 90, gran: 'day', sel: null, wdays: 90, wsel: null};
 let G = null, WP = [], W0 = 0, WT = 1;
 
-function setData(text) {
+let histN = 0;   // 過去データ(history.json)だけから表示している日数
+function setData(text, htext) {
   const o = JSON.parse(text);
   updated = o.updated || '';
-  rows = (o.days || []).map(d => ({n: dnum(d.d), s: d.s, m: d.m, a: d.a, t: d.t, b: d.b, w: d.w}))
+  // 日別データ(daily.json)を優先し、無い日だけ過去データ(history.json)で補う
+  const mp = new Map();
+  histN = 0;
+  if (htext) {
+    try { for (const d of (JSON.parse(htext).days || [])) mp.set(d.d, d); } catch (e) { /* 壊れていれば無視 */ }
+  }
+  const hk = new Set(mp.keys());
+  for (const d of (o.days || [])) mp.set(d.d, d);
+  for (const k of hk) if (!(o.days || []).some(d => d.d === k)) histN++;
+  rows = [...mp.values()].map(d => ({n: dnum(d.d), s: d.s, m: d.m, a: d.a, t: d.t, b: d.b, w: d.w}))
     .sort((a, b) => a.n - b.n);
   let carry = null;   // 基礎代謝は、記録のない日に直前の値を引き継ぐ
   for (const r of rows) {
@@ -348,7 +362,7 @@ function drawWeight() {
 
 // ---------- 全体 ----------
 function renderAll() {
-  $('info').textContent = rows.length ? '更新: ' + (updated ? updated.slice(0, 16).replace('T', ' ') : '-') + '(Android アプリが送信した時刻)' : '';
+  $('info').textContent = rows.length ? '更新: ' + (updated ? updated.slice(0, 16).replace('T', ' ') : '-') + '(Android アプリが送信した時刻)' + (histN ? ' ・ 過去データ(Google Takeout)' + histN + '日分を含む' : '') : '';
   S.sel = null; S.wsel = null;
   renderList(); renderGraph(); renderWeight();
 }
@@ -361,9 +375,14 @@ function showApp() {
 async function refresh() {
   $('msg').textContent = ''; $('bref').disabled = true; $('bref').textContent = '更新中…';
   try {
-    const text = await download();
-    setData(text);
-    try { localStorage.setItem(LS.c, text); } catch (e) { /* 保存できなくても続ける */ }
+    const text = await download(DPATH);
+    let htext = null;
+    try { htext = await download(HPATH); } catch (e) { /* 過去データが取れなくても続ける */ }
+    setData(text, htext);
+    try {
+      localStorage.setItem(LS.c, text);
+      if (htext) localStorage.setItem(LS.h, htext);
+    } catch (e) { /* 保存できなくても続ける */ }
     renderAll();
   } catch (e) {
     $('msg').textContent = String(e.message || e);
@@ -416,7 +435,7 @@ window.addEventListener('resize', () => {
   }
   if (!localStorage.getItem(LS.r)) { showLogin(); return; }
   showApp();
-  try { const c = localStorage.getItem(LS.c); if (c) { setData(c); renderAll(); } } catch (e) { /* 壊れた保存データは無視 */ }
+  try { const c = localStorage.getItem(LS.c); if (c) { setData(c, localStorage.getItem(LS.h)); renderAll(); } } catch (e) { /* 壊れた保存データは無視 */ }
   refresh();
 })();
 </script>
