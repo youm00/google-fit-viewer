@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Google Fit Viewer</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f8fb;--sf:#fff;--tx:#1d2733;--mu:#667788;--bd:#d9e0e8;--ac:#1e88e5;--sel:#e8710a;--avg:#d32f2f;--er:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#121a22;--sf:#1b2733;--tx:#e6edf3;--mu:#8b9bab;--bd:#2c3b4a;--ac:#64b5f6;--sel:#ffb74d;--avg:#ef9a9a;--er:#ef9a9a}}
+[hidden]{display:none!important}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;background:var(--sf);border-bottom:1px solid var(--bd)}
+h1{font-size:17px;margin:0}
+button,select{font:inherit;color:var(--tx);background:var(--sf);border:1px solid var(--bd);border-radius:8px;padding:5px 12px;cursor:pointer}
+button.pri{background:var(--ac);border-color:var(--ac);color:#fff}
+main{max-width:920px;margin:0 auto;padding:10px 12px 40px}
+#info{color:var(--mu);font-size:12px;margin:2px 0}
+#msg{color:var(--er);font-size:13px;white-space:pre-wrap;word-break:break-all}
+.card{background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:10px 0}
+.card h3{margin:0 0 6px;font-size:14px}
+.note{color:var(--mu);font-size:12px}
+nav{display:flex;gap:4px;margin:8px 0;border-bottom:1px solid var(--bd)}
+nav button{border:0;border-radius:8px 8px 0 0;background:none;padding:8px 14px}
+nav button.on{border-bottom:3px solid var(--ac);font-weight:700}
+.chip.on,.seg.on{background:var(--ac);border-color:var(--ac);color:#fff}
+.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;white-space:nowrap}
+th,td{padding:5px 8px;border-bottom:1px solid var(--bd);text-align:right}
+th:first-child,td:first-child{text-align:left}
+th{position:sticky;top:0;background:var(--sf);font-size:12px;color:var(--mu)}
+canvas{width:100%;display:block;touch-action:pan-y}
+.sel{min-height:22px;font-weight:700}
+.big{font-size:30px;font-weight:700}
+.li{display:flex;justify-content:space-between;gap:8px;padding:3px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Google Fit Viewer</h1>
+  <div id="hbtn" hidden><button id="bref">更新</button> <button id="bout">ログアウト</button></div>
+</header>
+<main>
+  <div id="info"></div>
+  <div id="msg"></div>
+  <div id="login" class="card" hidden>
+    <p>Dropbox にログインすると、Android アプリが送った日別データを表示します。</p>
+    <button id="blogin" class="pri">Dropbox にログイン</button>
+  </div>
+  <div id="app" hidden>
+    <nav id="tabs">
+      <button data-t="list" class="on">日別一覧</button>
+      <button data-t="graph">グラフ</button>
+      <button data-t="weight">体重</button>
+    </nav>
+    <section id="t-list"></section>
+    <section id="t-graph" hidden></section>
+    <section id="t-weight" hidden></section>
+  </div>
+</main>
+<script>
+'use strict';
+// ★ Dropbox App Console の「App key」に書き換える
+const APP_KEY = '0xfisab2ur4fodq';
+const WORKER = 'https://fit-viewer-auth.youm00.workers.dev';
+const REDIRECT = 'https://youm00.github.io/google-fit-viewer/';
+const DPATH = '/daily.json';
+const LS = {a: 'fitdbx_access', r: 'fitdbx_refresh', x: 'fitdbx_expiry', c: 'fit_daily_cache'};
+const $ = id => document.getElementById(id);
+const WK = ['日', '月', '火', '水', '木', '金', '土'];
+const DAY = 86400000;
+
+// ---------- 日付・書式 ----------
+const dnum = s => { const p = s.split('-'); return Math.round(Date.UTC(+p[0], +p[1] - 1, +p[2]) / DAY); };
+const dd = n => new Date(n * DAY);
+const todayNum = () => { const t = new Date(); return Math.round(Date.UTC(t.getFullYear(), t.getMonth(), t.getDate()) / DAY); };
+const dl = (n, y) => { const d = dd(n); return (y ? d.getUTCFullYear() + '/' : '') + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + '(' + WK[d.getUTCDay()] + ')'; };
+const fi = v => Math.round(v).toLocaleString('en-US');
+const f1 = v => v == null ? '-' : v.toFixed(1);
+const fInt = v => v == null ? '-' : fi(v);
+const fKm = m => m == null ? '-' : (m / 1000).toFixed(2);
+const signed = v => Math.abs(v) < 0.05 ? '±0.0' : (v > 0 ? '+' : '') + v.toFixed(1);
+
+// ---------- Dropbox 認証 ----------
+function saveTok(d, keep) {
+  if (d.access_token) localStorage.setItem(LS.a, d.access_token);
+  if (!keep && d.refresh_token) localStorage.setItem(LS.r, d.refresh_token);
+  localStorage.setItem(LS.x, String(Date.now() + (d.expires_in || 14400) * 1000));
+}
+async function post(path, body) {
+  const r = await fetch(WORKER + path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  return {ok: r.ok, status: r.status, d};
+}
+async function exchange(code) {
+  const r = await post('/token/exchange', {code, redirect_uri: REDIRECT});
+  if (!r.ok) throw new Error('ログインに失敗(' + r.status + '): ' + JSON.stringify(r.d));
+  saveTok(r.d);
+}
+function logout() {
+  [LS.a, LS.r, LS.x, LS.c].forEach(k => localStorage.removeItem(k));
+  rows = []; showLogin();
+}
+async function token(force) {
+  const rt = localStorage.getItem(LS.r);
+  if (!rt) return null;
+  const at = localStorage.getItem(LS.a), ex = +localStorage.getItem(LS.x) || 0;
+  if (!force && at && ex > Date.now() + 300000) return at;
+  const r = await post('/token/refresh', {refresh_token: rt});
+  if (!r.ok) {
+    if (r.status === 400 || r.status === 401) { logout(); throw new Error('ログインが無効になりました。もう一度ログインしてください'); }
+    throw new Error('トークン更新に失敗(' + r.status + ')');
+  }
+  saveTok(r.d, true);
+  return r.d.access_token;
+}
+async function download() {
+  for (let i = 0; i < 2; i++) {
+    const t = await token(i === 1);
+    if (!t) throw new Error('ログインが必要です');
+    const r = await fetch('https://content.dropboxapi.com/2/files/download', {
+      method: 'POST', headers: {Authorization: 'Bearer ' + t, 'Dropbox-API-Arg': JSON.stringify({path: DPATH})}});
+    if (r.status === 401 && i === 0) continue;
+    if (r.status === 409) throw new Error('daily.json がまだありません。Android アプリで送信してください');
+    if (!r.ok) throw new Error('取得に失敗(' + r.status + ')');
+    return await r.text();
+  }
+}
+
+// ---------- データ ----------
+let rows = [];   // 古い順
+let updated = '';
+const S = {tab: 'list', metric: 'steps', days: 90, gran: 'day', sel: null, wdays: 90, wsel: null};
+let G = null, WP = [], W0 = 0, WT = 1;
+
+function setData(text) {
+  const o = JSON.parse(text);
+  updated = o.updated || '';
+  rows = (o.days || []).map(d => ({n: dnum(d.d), s: d.s, m: d.m, a: d.a, t: d.t, b: d.b, w: d.w}))
+    .sort((a, b) => a.n - b.n);
+  let carry = null;   // 基礎代謝は、記録のない日に直前の値を引き継ぐ
+  for (const r of rows) {
+    if (r.b != null) { carry = r.b; r.b2 = r.b; r.bc = false; }
+    else { r.b2 = carry; r.bc = carry != null; }
+  }
+}
+
+const MET = {
+  steps: {l: '歩数', u: '歩', get: r => r.s, fmt: fInt, sum: 1, note: '歩数が記録されていない日は、棒が出ず、平均にも含みません。'},
+  distance: {l: '移動距離', u: 'km', get: r => r.m == null ? null : r.m / 1000, fmt: v => v.toFixed(2), sum: 1, note: '距離が記録されていない日は、棒が出ず、平均にも含みません。'},
+  total: {l: '総消費', u: 'kcal', get: r => r.t, fmt: fInt, sum: 1, note: '総消費カロリーは、基礎代謝と活動の合計です。'},
+  active: {l: '活動カロリー', u: 'kcal', get: r => r.a, fmt: fInt, sum: 1, note: '活動カロリーは、2026-10-03 より前は記録がありません。'},
+  basal: {l: '基礎代謝', u: 'kcal/日', get: r => r.b2, fmt: fInt, line: 1, note: '基礎代謝は、記録のない日は直前の値を引き継いでいます。'}
+};
+
+function buildGraph() {
+  const m = MET[S.metric], today = todayNum(), end = today - 1;   // 今日は途中の値なので除く
+  const all = [];
+  for (const r of rows) { if (r.n > end) continue; const v = m.get(r); if (v != null) all.push([r.n, v]); }
+  const start = S.days === 0 ? (all.length ? all[0][0] : end) : today - S.days;
+  const inR = all.filter(e => e[0] >= start);
+  const total = Math.max(end - start + 1, 1);
+  let sum = 0, mx = null, mn = null;
+  for (const e of inR) {
+    sum += e[1];
+    if (!mx || e[1] > mx.v) mx = {v: e[1], d: e[0]};
+    if (!mn || e[1] < mn.v) mn = {v: e[1], d: e[0]};
+  }
+  const avg = inR.length ? sum / inR.length : null;
+  const pts = [];
+  if (S.gran === 'day') {
+    for (const e of inR) pts.push({from: e[0], span: 1, v: e[1], cnt: 1, label: dl(e[0], true)});
+  } else {
+    const gm = new Map();
+    for (const e of inR) {
+      const d = dd(e[0]);
+      const gs = S.gran === 'week' ? e[0] - (d.getUTCDay() + 6) % 7
+        : Math.round(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / DAY);
+      if (!gm.has(gs)) gm.set(gs, []);
+      gm.get(gs).push(e[1]);
+    }
+    for (const gs of [...gm.keys()].sort((a, b) => a - b)) {
+      const d = dd(gs);
+      const ge = S.gran === 'week' ? gs + 7 : Math.round(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / DAY);
+      const from = Math.max(gs, start), to = Math.min(ge, end + 1);
+      const vals = gm.get(gs);
+      pts.push({from, span: Math.max(to - from, 1), v: vals.reduce((a, b) => a + b, 0) / vals.length, cnt: vals.length,
+        label: S.gran === 'week' ? d.getUTCFullYear() + '/' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' からの週(平均)'
+          : d.getUTCFullYear() + '年' + (d.getUTCMonth() + 1) + '月(平均)'});
+    }
+  }
+  return {pts, start, total, n: inR.length, avg, sum, mx, mn};
+}
+
+// ---------- グラフ描画 ----------
+function niceTicks(mn, mx) {
+  let range = mx - mn;
+  if (range <= 0) range = Math.abs(mx) > 0 ? Math.abs(mx) * 0.2 : 1;
+  const raw = range / 4, mag = Math.pow(10, Math.floor(Math.log10(raw))), nm = raw / mag;
+  const step = (nm <= 1 ? 1 : nm <= 2 ? 2 : nm <= 5 ? 5 : 10) * mag;
+  const s = Math.floor(mn / step), e = Math.ceil(mx / step), v = [];
+  for (let i = s; i <= e; i++) v.push(i * step);
+  if (v.length < 2) v.push((s + 1) * step);
+  return {v, step};
+}
+const CL = 52, CR = 12, CT = 16, CB = 26;
+function drawChart(cv, o) {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const cs = getComputedStyle(document.documentElement), col = n => cs.getPropertyValue(n).trim();
+  const pw = W - CL - CR, ph = H - CT - CB;
+  if (!o.pts.length || pw <= 0 || ph <= 0) return;
+  let lo = Infinity, hi = -Infinity;
+  for (const p of o.pts) { if (p.v < lo) lo = p.v; if (p.v > hi) hi = p.v; }
+  let mn, mx;
+  if (o.line) { const pad = Math.max((hi - lo) * 0.15, o.pad || 1); mn = lo - pad; mx = hi + pad; } else { mn = 0; mx = hi; }
+  const tk = niceTicks(mn, mx), y0 = tk.v[0], y1 = tk.v[tk.v.length - 1];
+  const yOf = v => CT + ph * (1 - (v - y0) / (y1 - y0)), xOf = d => CL + pw * (d / o.total);
+  g.font = '11px system-ui,sans-serif'; g.textBaseline = 'middle';
+  g.strokeStyle = col('--bd'); g.fillStyle = col('--tx'); g.lineWidth = 1;
+  g.textAlign = 'right';
+  for (const v of tk.v) {
+    const y = yOf(v);
+    g.beginPath(); g.moveTo(CL, y); g.lineTo(CL + pw, y); g.stroke();
+    g.fillText(o.tick(v, tk.step), CL - 6, y);
+  }
+  g.textAlign = 'center';
+  for (let k = 0; k < 4; k++) {
+    const idx = Math.round((o.total - 1) * k / 3), d = dd(o.start + idx);
+    const lb = o.total > 120 ? String(d.getUTCFullYear() % 100).padStart(2, '0') + '/' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate()
+      : (d.getUTCMonth() + 1) + '/' + d.getUTCDate();
+    g.fillText(lb, xOf(idx + 0.5), CT + ph + 14);
+  }
+  const ac = col('--ac'), sc = col('--sel');
+  const cx = p => xOf(p.from - o.start + p.span / 2);
+  if (!o.line) {
+    o.pts.forEach((p, i) => {
+      const x0 = xOf(p.from - o.start), x1 = xOf(p.from - o.start + p.span), gap = x1 - x0 > 4 ? 1 : 0;
+      g.fillStyle = i === o.sel ? sc : ac;
+      g.fillRect(x0 + gap / 2, yOf(p.v), Math.max(x1 - x0 - gap, 1), yOf(0) - yOf(p.v));
+    });
+  } else {
+    g.strokeStyle = ac; g.lineWidth = o.pts.length > 60 ? 2 : 2.5; g.lineJoin = 'round';
+    g.beginPath();
+    o.pts.forEach((p, i) => { const x = cx(p), y = yOf(p.v); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke();
+    g.fillStyle = ac;
+    const r = o.pts.length > 60 ? 2 : 3.5;
+    o.pts.forEach((p, i) => { if (i === o.sel) return; g.beginPath(); g.arc(cx(p), yOf(p.v), r, 0, 7); g.fill(); });
+  }
+  if (o.avg != null && o.avg >= y0 && o.avg <= y1) {
+    g.strokeStyle = col('--avg'); g.lineWidth = 1.5; g.setLineDash([6, 5]);
+    g.beginPath(); g.moveTo(CL, yOf(o.avg)); g.lineTo(CL + pw, yOf(o.avg)); g.stroke(); g.setLineDash([]);
+  }
+  if (o.sel != null && o.pts[o.sel]) {
+    const p = o.pts[o.sel], x = cx(p);
+    g.strokeStyle = sc; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, CT); g.lineTo(x, CT + ph); g.stroke();
+    if (o.line) { g.fillStyle = sc; g.beginPath(); g.arc(x, yOf(p.v), 5, 0, 7); g.fill(); }
+  }
+  cv._pick = cx2 => {   // クリック位置から、いちばん近い1本を選ぶ
+    let best = 0, bd = Infinity;
+    o.pts.forEach((p, i) => { const d = Math.abs(cx(p) - cx2); if (d < bd) { bd = d; best = i; } });
+    return best;
+  };
+}
+function bindPick(cv, onPick) {
+  const h = e => { if (!cv._pick) return; onPick(cv._pick(e.clientX - cv.getBoundingClientRect().left)); };
+  cv.addEventListener('pointerdown', h);
+  cv.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' || e.buttons) h(e); });
+}
+
+// ---------- 画面: 日別一覧 ----------
+function renderList() {
+  const el = $('t-list');
+  if (!rows.length) { el.innerHTML = '<p class="note">データがありません</p>'; return; }
+  const tr = [...rows].reverse().map(r => '<tr><td>' + dl(r.n, true) + '</td><td>' + fInt(r.s) + '</td><td>' + fKm(r.m) +
+    '</td><td>' + fInt(r.t) + '</td><td>' + fInt(r.a) + '</td><td>' + fInt(r.b2) + (r.bc ? '※' : '') + '</td><td>' + f1(r.w) + '</td></tr>').join('');
+  el.innerHTML = '<div class="note">' + rows.length + '日分 ' + dl(rows[0].n, true) + ' 〜 ' + dl(rows[rows.length - 1].n, true) +
+    '<br>基礎代謝の「※」は、その日の記録がなく直前の値を表示しています。今日の総消費は途中の値です。</div>' +
+    '<div class="card tw"><table><thead><tr><th>日付</th><th>歩数</th><th>距離 km</th><th>総消費 kcal</th><th>活動 kcal</th><th>基礎代謝 kcal</th><th>体重 kg</th></tr></thead><tbody>' + tr + '</tbody></table></div>';
+}
+
+// ---------- 画面: グラフ ----------
+const opt = (v, t, cur) => '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + t + '</option>';
+function renderGraph() {
+  const m = MET[S.metric]; G = buildGraph();
+  const chips = Object.keys(MET).map(k => '<button class="chip' + (k === S.metric ? ' on' : '') + '" data-m="' + k + '">' + MET[k].l + '</button>').join('');
+  const segs = [['day', '日'], ['week', '週平均'], ['month', '月平均']].map(a => '<button class="seg' + (S.gran === a[0] ? ' on' : '') + '" data-g="' + a[0] + '">' + a[1] + '</button>').join('');
+  let h = '<div class="row">' + chips + '</div><div class="row">期間: <select data-d="g">' +
+    [[30, '30日'], [90, '90日'], [180, '180日'], [365, '365日'], [0, '全期間']].map(a => opt(a[0], a[1], S.days)).join('') +
+    '</select>' + segs + '</div>';
+  if (!G.pts.length) { $('t-graph').innerHTML = h + '<p class="note">この期間のデータがありません</p><p class="note">' + m.note + '</p>'; return; }
+  const list = [...G.pts].reverse().slice(0, 150);
+  h += '<div class="sel" id="gsel"></div><div class="card"><canvas id="gc" style="height:280px"></canvas></div>' +
+    '<div class="note">破線は期間全体の平均です。今日は途中の値のため、除いています。</div>' +
+    '<div class="card"><h3>' + m.l + 'の集計</h3>' +
+    '<div>平均: ' + m.fmt(G.avg) + ' ' + m.u + '(1日あたり)</div>' +
+    '<div>最大: ' + m.fmt(G.mx.v) + ' ' + m.u + '(' + dl(G.mx.d, true) + ')</div>' +
+    '<div>最小: ' + m.fmt(G.mn.v) + ' ' + m.u + '(' + dl(G.mn.d, true) + ')</div>' +
+    (m.sum ? '<div>合計: ' + m.fmt(G.sum) + ' ' + m.u + '</div>' : '') +
+    '<div>値のある日: ' + G.n + '日 / ' + G.total + '日</div><div class="note">' + m.note + '</div></div>' +
+    '<div class="card"><h3>値の一覧</h3>' + list.map(p => '<div class="li"><span>' + p.label + '</span><span>' + m.fmt(p.v) + ' ' + m.u + '</span></div>').join('') +
+    (G.pts.length > 150 ? '<div class="note">新しい順に150件まで表示しています(全' + G.pts.length + '件)。</div>' : '') + '</div>';
+  $('t-graph').innerHTML = h;
+  bindPick($('gc'), i => { if (i !== S.sel) { S.sel = i; drawGraph(); } });
+  drawGraph();
+}
+function drawGraph() {
+  const cv = $('gc'); if (!cv || !G) return;
+  const m = MET[S.metric], dist = S.metric === 'distance';
+  drawChart(cv, {pts: G.pts, start: G.start, total: G.total, line: !!m.line, avg: G.avg, sel: S.sel,
+    tick: (v, s) => dist && s < 1 ? v.toFixed(1) : fi(v)});
+  const p = S.sel != null ? G.pts[S.sel] : null;
+  $('gsel').textContent = p ? p.label + '   ' + m.fmt(p.v) + ' ' + m.u + (p.cnt > 1 ? '  (' + p.cnt + '日分)' : '') : 'グラフをタップすると、値が表示されます';
+}
+
+// ---------- 画面: 体重 ----------
+function renderWeight() {
+  const today = todayNum(), cut = S.wdays === 0 ? -Infinity : today - (S.wdays - 1);
+  WP = rows.filter(r => r.w != null && r.n >= cut).map(r => ({from: r.n, span: 1, v: r.w, label: dl(r.n, true)}));
+  const sel = '<div class="row">期間: <select data-d="w">' + [[30, '30日'], [90, '90日'], [180, '180日'], [0, '全期間']].map(a => opt(a[0], a[1], S.wdays)).join('') + '</select></div>';
+  if (!WP.length) { $('t-weight').innerHTML = sel + '<p class="note">この期間の体重のデータがありません</p>'; return; }
+  const first = WP[0], last = WP[WP.length - 1];
+  W0 = first.from; WT = today - W0 + 1;
+  const vs = WP.map(p => p.v);
+  const recs = [...WP].reverse().map((p, i, a) => '<div class="li"><span>' + p.label + '</span><span>' + f1(p.v) +
+    ' kg <span class="note" style="display:inline-block;width:56px;text-align:right">' + (i < a.length - 1 ? signed(p.v - a[i + 1].v) : '') + '</span></span></div>').join('');
+  $('t-weight').innerHTML = sel + '<div class="card"><span class="big">' + f1(last.v) + '</span> kg <span class="note">(' + last.label + ')</span>' +
+    '<div>期間内の変化: ' + signed(last.v - first.v) + ' kg(' + first.label + ' ' + f1(first.v) + ' kg から)</div>' +
+    '<div>最小 ' + f1(Math.min(...vs)) + ' kg ・ 最大 ' + f1(Math.max(...vs)) + ' kg</div>' +
+    '<div>記録のある日: ' + WP.length + '日 / ' + WT + '日</div></div>' +
+    '<div class="sel" id="wsel"></div><div class="card"><canvas id="wc" style="height:260px"></canvas></div>' +
+    '<div class="card"><h3>記録一覧</h3>' + recs + '</div>';
+  bindPick($('wc'), i => { if (i !== S.wsel) { S.wsel = i; drawWeight(); } });
+  drawWeight();
+}
+function drawWeight() {
+  const cv = $('wc'); if (!cv || !WP.length) return;
+  drawChart(cv, {pts: WP, start: W0, total: WT, line: true, pad: 0.3, avg: null, sel: S.wsel, tick: v => v.toFixed(1)});
+  const p = S.wsel != null ? WP[S.wsel] : null;
+  $('wsel').textContent = p ? p.label + '   ' + f1(p.v) + ' kg' : 'グラフをタップすると、値が表示されます';
+}
+
+// ---------- 全体 ----------
+function renderAll() {
+  $('info').textContent = rows.length ? '更新: ' + (updated ? updated.slice(0, 16).replace('T', ' ') : '-') + '(Android アプリが送信した時刻)' : '';
+  S.sel = null; S.wsel = null;
+  renderList(); renderGraph(); renderWeight();
+}
+function showLogin() {
+  $('login').hidden = false; $('app').hidden = true; $('hbtn').hidden = true; $('info').textContent = '';
+}
+function showApp() {
+  $('login').hidden = true; $('app').hidden = false; $('hbtn').hidden = false;
+}
+async function refresh() {
+  $('msg').textContent = ''; $('bref').disabled = true; $('bref').textContent = '更新中…';
+  try {
+    const text = await download();
+    setData(text);
+    try { localStorage.setItem(LS.c, text); } catch (e) { /* 保存できなくても続ける */ }
+    renderAll();
+  } catch (e) {
+    $('msg').textContent = String(e.message || e);
+  }
+  $('bref').disabled = false; $('bref').textContent = '更新';
+}
+function startLogin() {
+  if (APP_KEY.startsWith('ここに')) { $('msg').textContent = 'index.html の APP_KEY が未設定です'; return; }
+  location.href = 'https://www.dropbox.com/oauth2/authorize?client_id=' + APP_KEY + '&response_type=code&redirect_uri=' +
+    encodeURIComponent(REDIRECT) + '&token_access_type=offline';
+}
+
+$('blogin').onclick = startLogin;
+$('bref').onclick = refresh;
+$('bout').onclick = () => { if (confirm('ログアウトしますか?(この端末の保存データも消えます)')) logout(); };
+$('tabs').addEventListener('click', e => {
+  const t = e.target.dataset.t; if (!t) return;
+  S.tab = t;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  ['list', 'graph', 'weight'].forEach(k => { $('t-' + k).hidden = k !== t; });
+  if (t === 'graph') drawGraph();
+  if (t === 'weight') drawWeight();
+});
+$('app').addEventListener('click', e => {
+  const b = e.target;
+  if (b.dataset.m) { S.metric = b.dataset.m; S.sel = null; renderGraph(); }
+  else if (b.dataset.g) { S.gran = b.dataset.g; S.sel = null; renderGraph(); }
+});
+$('app').addEventListener('change', e => {
+  const k = e.target.dataset.d;
+  if (k === 'g') { S.days = +e.target.value; S.sel = null; renderGraph(); }
+  if (k === 'w') { S.wdays = +e.target.value; S.wsel = null; renderWeight(); }
+});
+let rz = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(rz);
+  rz = requestAnimationFrame(() => { if (S.tab === 'graph') drawGraph(); if (S.tab === 'weight') drawWeight(); });
+});
+
+(async () => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('code')) {
+    $('msg').textContent = 'ログイン中…';
+    try { await exchange(q.get('code')); $('msg').textContent = ''; }
+    catch (e) { $('msg').textContent = String(e.message || e); }
+    history.replaceState(null, '', location.pathname);
+  } else if (q.get('error')) {
+    $('msg').textContent = 'ログインがキャンセルされました: ' + (q.get('error_description') || q.get('error'));
+    history.replaceState(null, '', location.pathname);
+  }
+  if (!localStorage.getItem(LS.r)) { showLogin(); return; }
+  showApp();
+  try { const c = localStorage.getItem(LS.c); if (c) { setData(c); renderAll(); } } catch (e) { /* 壊れた保存データは無視 */ }
+  refresh();
+})();
+</script>
+</body>
+</html>
