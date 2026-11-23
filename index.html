@@ -25,6 +25,7 @@ nav button{border:0;border-radius:8px 8px 0 0;background:none;padding:8px 14px}
 nav button.on{border-bottom:3px solid var(--ac);font-weight:700}
 .chip.on,.seg.on{background:var(--ac);border-color:var(--ac);color:#fff}
 .row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.pick{position:sticky;top:0;z-index:3;background:var(--bg);padding:6px 0;margin:0}
 .tw{overflow-x:auto}
 table{border-collapse:collapse;width:100%;white-space:nowrap}
 th,td{padding:5px 8px;border-bottom:1px solid var(--bd);text-align:right}
@@ -135,7 +136,7 @@ async function download(path) {
 // ---------- データ ----------
 let rows = [];   // 古い順
 let updated = '';
-const S = {tab: 'list', metric: 'steps', days: 90, gran: 'day', sel: null, wdays: 90, wsel: null};
+const S = {tab: 'list', metric: 'steps', days: 90, gran: 'day', sel: null, wdays: 90, wsel: null, ly: -1, lm: 0};   // ly: -1 = 最新の年, 0 = 全期間 / lm: 0 = 全月
 let G = null, WP = [], W0 = 0, WT = 1;
 
 let histN = 0;   // 過去データ(history.json)だけから表示している日数
@@ -151,7 +152,7 @@ function setData(text, htext) {
   const hk = new Set(mp.keys());
   for (const d of (o.days || [])) mp.set(d.d, d);
   for (const k of hk) if (!(o.days || []).some(d => d.d === k)) histN++;
-  rows = [...mp.values()].map(d => ({n: dnum(d.d), s: d.s, m: d.m, a: d.a, t: d.t, b: d.b, w: d.w}))
+  rows = [...mp.values()].map(d => ({n: dnum(d.d), s: d.s, m: d.m, a: d.a, t: d.t, b: d.b, w: d.w, e: d.e}))
     .sort((a, b) => a.n - b.n);
   let carry = null;   // 基礎代謝は、記録のない日に直前の値を引き継ぐ
   for (const r of rows) {
@@ -171,7 +172,8 @@ const MET = {
 function buildGraph() {
   const m = MET[S.metric], today = todayNum(), end = today - 1;   // 今日は途中の値なので除く
   const all = [];
-  for (const r of rows) { if (r.n > end) continue; const v = m.get(r); if (v != null) all.push([r.n, v]); }
+  const estOk = S.metric === 'steps' || S.metric === 'distance';   // 推定値(タイムライン)があるのは歩数・距離だけ
+  for (const r of rows) { if (r.n > end) continue; const v = m.get(r); if (v != null) all.push([r.n, v, !!r.e && estOk]); }
   const start = S.days === 0 ? (all.length ? all[0][0] : end) : today - S.days;
   const inR = all.filter(e => e[0] >= start);
   const total = Math.max(end - start + 1, 1);
@@ -184,22 +186,23 @@ function buildGraph() {
   const avg = inR.length ? sum / inR.length : null;
   const pts = [];
   if (S.gran === 'day') {
-    for (const e of inR) pts.push({from: e[0], span: 1, v: e[1], cnt: 1, label: dl(e[0], true)});
+    for (const e of inR) pts.push({from: e[0], span: 1, v: e[1], cnt: 1, est: e[2], label: dl(e[0], true)});
   } else {
-    const gm = new Map();
+    const gm = new Map(), gmEst = new Set();
     for (const e of inR) {
       const d = dd(e[0]);
       const gs = S.gran === 'week' ? e[0] - (d.getUTCDay() + 6) % 7
         : Math.round(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / DAY);
       if (!gm.has(gs)) gm.set(gs, []);
       gm.get(gs).push(e[1]);
+      if (e[2]) gmEst.add(gs);
     }
     for (const gs of [...gm.keys()].sort((a, b) => a - b)) {
       const d = dd(gs);
       const ge = S.gran === 'week' ? gs + 7 : Math.round(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / DAY);
       const from = Math.max(gs, start), to = Math.min(ge, end + 1);
       const vals = gm.get(gs);
-      pts.push({from, span: Math.max(to - from, 1), v: vals.reduce((a, b) => a + b, 0) / vals.length, cnt: vals.length,
+      pts.push({from, span: Math.max(to - from, 1), v: vals.reduce((a, b) => a + b, 0) / vals.length, cnt: vals.length, est: gmEst.has(gs),
         label: S.gran === 'week' ? d.getUTCFullYear() + '/' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' からの週(平均)'
           : d.getUTCFullYear() + '年' + (d.getUTCMonth() + 1) + '月(平均)'});
     }
@@ -254,9 +257,11 @@ function drawChart(cv, o) {
   if (!o.line) {
     o.pts.forEach((p, i) => {
       const x0 = xOf(p.from - o.start), x1 = xOf(p.from - o.start + p.span), gap = x1 - x0 > 4 ? 1 : 0;
+      g.globalAlpha = p.est && i !== o.sel ? 0.45 : 1;   // 推定値の棒は薄く
       g.fillStyle = i === o.sel ? sc : ac;
       g.fillRect(x0 + gap / 2, yOf(p.v), Math.max(x1 - x0 - gap, 1), yOf(0) - yOf(p.v));
     });
+    g.globalAlpha = 1;
   } else {
     g.strokeStyle = ac; g.lineWidth = o.pts.length > 60 ? 2 : 2.5; g.lineJoin = 'round';
     g.beginPath();
@@ -292,10 +297,22 @@ function bindPick(cv, onPick) {
 function renderList() {
   const el = $('t-list');
   if (!rows.length) { el.innerHTML = '<p class="note">データがありません</p>'; return; }
-  const tr = [...rows].reverse().map(r => '<tr><td>' + dl(r.n, true) + '</td><td>' + fInt(r.s) + '</td><td>' + fKm(r.m) +
+  // 年・月での絞り込み
+  const years = [...new Set(rows.map(r => dd(r.n).getUTCFullYear()))].sort((a, b) => b - a);
+  let y = S.ly === -1 ? years[0] : S.ly;
+  if (y !== 0 && !years.includes(y)) y = 0;
+  const mo = y === 0 ? 0 : S.lm;
+  const sh = rows.filter(r => { const d = dd(r.n); return (y === 0 || d.getUTCFullYear() === y) && (mo === 0 || d.getUTCMonth() + 1 === mo); });
+  const pick = '<div class="row pick">年: <select data-d="ly">' + opt(0, '全期間', y) + years.map(v => opt(v, v + '年', y)).join('') +
+    '</select> 月: <select data-d="lm"' + (y === 0 ? ' disabled' : '') + '>' + opt(0, '全月', mo) +
+    Array.from({length: 12}, (_, i) => opt(i + 1, (i + 1) + '月', mo)).join('') + '</select></div>';
+  if (!sh.length) { el.innerHTML = pick + '<p class="note">この期間のデータがありません</p>'; return; }
+  const tr = [...sh].reverse().map(r => '<tr><td>' + dl(r.n, true) + '</td><td>' + (r.e ? '約' : '') + fInt(r.s) + '</td><td>' + (r.e ? '約' : '') + fKm(r.m) +
     '</td><td>' + fInt(r.t) + '</td><td>' + fInt(r.a) + '</td><td>' + fInt(r.b2) + (r.bc ? '※' : '') + '</td><td>' + f1(r.w) + '</td></tr>').join('');
-  el.innerHTML = '<div class="note">' + rows.length + '日分 ' + dl(rows[0].n, true) + ' 〜 ' + dl(rows[rows.length - 1].n, true) +
-    '<br>基礎代謝の「※」は、その日の記録がなく直前の値を表示しています。今日の総消費は途中の値です。</div>' +
+  el.innerHTML = pick + '<div class="note">' + sh.length + '日分 ' + dl(sh[0].n, true) + ' 〜 ' + dl(sh[sh.length - 1].n, true) +
+    (sh.length !== rows.length ? '(全' + rows.length + '日分)' : '') +
+    '<br>基礎代謝の「※」は、その日の記録がなく直前の値を表示しています。今日の総消費は途中の値です。' +
+    (rows.some(r => r.e) ? '<br>歩数・距離の「約」は、Google マップのタイムラインからの推定値です。' : '') + '</div>' +
     '<div class="card tw"><table><thead><tr><th>日付</th><th>歩数</th><th>距離 km</th><th>総消費 kcal</th><th>活動 kcal</th><th>基礎代謝 kcal</th><th>体重 kg</th></tr></thead><tbody>' + tr + '</tbody></table></div>';
 }
 
@@ -311,7 +328,8 @@ function renderGraph() {
   if (!G.pts.length) { $('t-graph').innerHTML = h + '<p class="note">この期間のデータがありません</p><p class="note">' + m.note + '</p>'; return; }
   const list = [...G.pts].reverse().slice(0, 150);
   h += '<div class="sel" id="gsel"></div><div class="card"><canvas id="gc" style="height:280px"></canvas></div>' +
-    '<div class="note">破線は期間全体の平均です。今日は途中の値のため、除いています。</div>' +
+    '<div class="note">破線は期間全体の平均です。今日は途中の値のため、除いています。' +
+    (G.pts.some(p => p.est) ? '<br>薄い棒は、Google マップのタイムラインからの推定値(または、それを含む週・月)です。平均・合計にも含みます。' : '') + '</div>' +
     '<div class="card"><h3>' + m.l + 'の集計</h3>' +
     '<div>平均: ' + m.fmt(G.avg) + ' ' + m.u + '(1日あたり)</div>' +
     '<div>最大: ' + m.fmt(G.mx.v) + ' ' + m.u + '(' + dl(G.mx.d, true) + ')</div>' +
@@ -330,7 +348,7 @@ function drawGraph() {
   drawChart(cv, {pts: G.pts, start: G.start, total: G.total, line: !!m.line, avg: G.avg, sel: S.sel,
     tick: (v, s) => dist && s < 1 ? v.toFixed(1) : fi(v)});
   const p = S.sel != null ? G.pts[S.sel] : null;
-  $('gsel').textContent = p ? p.label + '   ' + m.fmt(p.v) + ' ' + m.u + (p.cnt > 1 ? '  (' + p.cnt + '日分)' : '') : 'グラフをタップすると、値が表示されます';
+  $('gsel').textContent = p ? p.label + '   ' + m.fmt(p.v) + ' ' + m.u + (p.cnt > 1 ? '  (' + p.cnt + '日分)' : '') + (p.est ? '  (推定を含む)' : '') : 'グラフをタップすると、値が表示されます';
 }
 
 // ---------- 画面: 体重 ----------
@@ -415,6 +433,8 @@ $('app').addEventListener('change', e => {
   const k = e.target.dataset.d;
   if (k === 'g') { S.days = +e.target.value; S.sel = null; renderGraph(); }
   if (k === 'w') { S.wdays = +e.target.value; S.wsel = null; renderWeight(); }
+  if (k === 'ly') { S.ly = +e.target.value; S.lm = 0; renderList(); window.scrollTo(0, 0); }
+  if (k === 'lm') { S.lm = +e.target.value; renderList(); window.scrollTo(0, 0); }
 });
 let rz = 0;
 window.addEventListener('resize', () => {
