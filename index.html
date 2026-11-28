@@ -34,6 +34,7 @@ nav button.on{border-bottom:3px solid var(--ac);font-weight:700}
 table{border-collapse:collapse;width:100%;white-space:nowrap}
 th,td{padding:5px 8px;border-bottom:1px solid var(--bd);text-align:right}
 th:first-child,td:first-child{text-align:left}
+.miss td{color:var(--mu);opacity:.75}
 th{position:sticky;top:0;background:var(--sf);font-size:12px;color:var(--mu)}
 canvas{width:100%;display:block;touch-action:pan-y}
 .sel{min-height:22px;font-weight:700}
@@ -67,7 +68,7 @@ canvas{width:100%;display:block;touch-action:pan-y}
 <script>
 'use strict';
 // ★ Dropbox App Console の「App key」に書き換える
-const APP_KEY = 'ここにApp keyを入れる';
+const APP_KEY = '0xfisab2ur4fodq';
 const WORKER = 'https://fit-viewer-auth.youm00.workers.dev';
 const REDIRECT = 'https://youm00.github.io/google-fit-viewer/';
 const DPATH = '/daily.json';
@@ -301,21 +302,26 @@ function bindPick(cv, onPick) {
 function renderList() {
   const el = $('t-list');
   if (!rows.length) { el.innerHTML = '<p class="note">データがありません</p>'; return; }
+  // 記録のない日(行が無い日)も、日付だけの行として補う(最初のデータの日〜昨日)
+  const byN = new Map(rows.map(r => [r.n, r]));
+  const endN = Math.max(todayNum() - 1, rows[rows.length - 1].n);
+  const full = [];
+  for (let n = rows[0].n; n <= endN; n++) full.push(byN.get(n) || {n, miss: true});
   // 年・月での絞り込み
-  const years = [...new Set(rows.map(r => dd(r.n).getUTCFullYear()))].sort((a, b) => b - a);
+  const years = [...new Set(full.map(r => dd(r.n).getUTCFullYear()))].sort((a, b) => b - a);
   let y = S.ly === -1 ? years[0] : S.ly;
   if (y !== 0 && !years.includes(y)) y = 0;
   const mo = y === 0 ? 0 : S.lm;
-  const sh = rows.filter(r => { const d = dd(r.n); return (y === 0 || d.getUTCFullYear() === y) && (mo === 0 || d.getUTCMonth() + 1 === mo); });
+  const sh = full.filter(r => { const d = dd(r.n); return (y === 0 || d.getUTCFullYear() === y) && (mo === 0 || d.getUTCMonth() + 1 === mo); });
   const pick = '<div class="row pick">年: <select data-d="ly">' + opt(0, '全期間', y) + years.map(v => opt(v, v + '年', y)).join('') +
     '</select> 月: <select data-d="lm"' + (y === 0 ? ' disabled' : '') + '>' + opt(0, '全月', mo) +
     Array.from({length: 12}, (_, i) => opt(i + 1, (i + 1) + '月', mo)).join('') + '</select></div>';
   if (!sh.length) { el.innerHTML = pick + '<p class="note">この期間のデータがありません</p>'; return; }
-  const tr = [...sh].reverse().map(r => '<tr><td>' + dl(r.n, true) + '</td><td>' + (r.e ? '約' : '') + fInt(r.s) + '</td><td>' + (r.e ? '約' : '') + fKm(r.m) +
+  const tr = [...sh].reverse().map(r => r.miss ? '<tr class="miss"><td>' + dl(r.n, true) + '</td>' + '<td>-</td>'.repeat(6) + '</tr>' : '<tr><td>' + dl(r.n, true) + '</td><td>' + (r.e ? '約' : '') + fInt(r.s) + '</td><td>' + (r.e ? '約' : '') + fKm(r.m) +
     '</td><td>' + fInt(r.t) + '</td><td>' + fInt(r.a) + '</td><td>' + fInt(r.b2) + (r.bc ? '※' : '') + '</td><td>' + f1(r.w) + '</td></tr>').join('');
   el.innerHTML = pick + '<div class="note">' + sh.length + '日分 ' + dl(sh[0].n, true) + ' 〜 ' + dl(sh[sh.length - 1].n, true) +
-    (sh.length !== rows.length ? '(全' + rows.length + '日分)' : '') +
-    '<br>基礎代謝の「※」は、その日の記録がなく直前の値を表示しています。今日の総消費は途中の値です。' +
+    (sh.length !== full.length ? '(全' + full.length + '日分)' : '') +
+    '<br>基礎代謝の「※」は、その日の記録がなく直前の値を表示しています。今日の総消費は途中の値です。<br>灰色の行は、記録のない日です(歩数ゼロ、または記録なし)。' +
     (rows.some(r => r.e) ? '<br>歩数・距離の「約」は、Google マップのタイムラインからの推定値です。' : '') + '</div>' +
     '<div class="card tw"><table><thead><tr><th>日付</th><th>歩数</th><th>距離 km</th><th>総消費 kcal</th><th>活動 kcal</th><th>基礎代謝 kcal</th><th>体重 kg</th></tr></thead><tbody>' + tr + '</tbody></table></div>';
 }
