@@ -141,7 +141,7 @@ async function download(path) {
 // ---------- データ ----------
 let rows = [];   // 古い順
 let updated = '';
-const S = {tab: 'list', metric: 'steps', days: 90, gran: 'day', sel: null, wdays: 90, wsel: null, ly: -1, lm: 0};   // ly: -1 = 最新の年, 0 = 全期間 / lm: 0 = 全月
+const S = {tab: 'list', metric: 'steps', days: 90, gm: 0, gran: 'day', sel: null, wdays: 90, wsel: null, ly: -1, lm: 0};   // ly: -1 = 最新の年, 0 = 全期間 / lm: 0 = 全月
 let G = null, WP = [], W0 = 0, WT = 1;
 
 let histN = 0;   // 過去データ(history.json)だけから表示している日数
@@ -175,11 +175,19 @@ const MET = {
 };
 
 function buildGraph() {
-  const m = MET[S.metric], today = todayNum(), end = today - 1;   // 今日は途中の値なので除く
+  const m = MET[S.metric], today = todayNum();
+  let end = today - 1;   // 今日は途中の値なので除く
+  let rs = null;   // 年(・月)を選んだときの期間の最初の日。終わりの日は昨日を超えない
+  if (S.days < 0) {
+    const y = -S.days;
+    rs = Math.round(Date.UTC(y, S.gm ? S.gm - 1 : 0, 1) / DAY);
+    const re = Math.round(Date.UTC(y, S.gm ? S.gm : 12, 0) / DAY);
+    if (re < end) end = re;
+  }
   const all = [];
   const estOk = S.metric === 'steps' || S.metric === 'distance';   // 推定値(タイムライン)があるのは歩数・距離だけ
   for (const r of rows) { if (r.n > end) continue; const v = m.get(r); if (v != null) all.push([r.n, v, !!r.e && estOk]); }
-  const start = S.days === 0 ? (all.length ? all[0][0] : end) : today - S.days;
+  const start = rs != null ? rs : S.days === 0 ? (all.length ? all[0][0] : end) : today - S.days;
   const inR = all.filter(e => e[0] >= start);
   const total = Math.max(end - start + 1, 1);
   let sum = 0, mx = null, mn = null;
@@ -332,9 +340,12 @@ function renderGraph() {
   const m = MET[S.metric]; G = buildGraph();
   const chips = Object.keys(MET).map(k => '<button class="chip' + (k === S.metric ? ' on' : '') + '" data-m="' + k + '">' + MET[k].l + '</button>').join('');
   const segs = [['day', '日'], ['week', '週平均'], ['month', '月平均']].map(a => '<button class="seg' + (S.gran === a[0] ? ' on' : '') + '" data-g="' + a[0] + '">' + a[1] + '</button>').join('');
+  const gy = [...new Set(rows.map(r => dd(r.n).getUTCFullYear()))].sort((a, b) => b - a);
+  if (S.days < 0 && !gy.includes(-S.days)) S.days = 90;
   let h = '<div class="row">' + chips + '</div><div class="row">期間: <select data-d="g">' +
-    [[30, '30日'], [90, '90日'], [180, '180日'], [365, '365日'], [0, '全期間']].map(a => opt(a[0], a[1], S.days)).join('') +
-    '</select>' + segs + '</div>';
+    [[30, '30日'], [90, '90日'], [180, '180日'], [365, '365日'], [0, '全期間']].concat(gy.map(y => [-y, y + '年'])).map(a => opt(a[0], a[1], S.days)).join('') +
+    '</select> 月: <select data-d="gm"' + (S.days < 0 ? '' : ' disabled') + '>' + opt(0, '全月', S.days < 0 ? S.gm : 0) +
+    Array.from({length: 12}, (_, i) => opt(i + 1, (i + 1) + '月', S.days < 0 ? S.gm : 0)).join('') + '</select> ' + segs + '</div>';
   if (!G.pts.length) { $('t-graph').innerHTML = h + '<p class="note">この期間のデータがありません</p><p class="note">' + m.note + '</p>'; return; }
   const list = [...G.pts].reverse().slice(0, 150);
   h += '<div class="sel" id="gsel"></div><div class="card"><canvas id="gc" style="height:280px"></canvas></div>' +
@@ -441,7 +452,8 @@ $('app').addEventListener('click', e => {
 });
 $('app').addEventListener('change', e => {
   const k = e.target.dataset.d;
-  if (k === 'g') { S.days = +e.target.value; S.sel = null; renderGraph(); }
+  if (k === 'g') { S.days = +e.target.value; S.gm = 0; S.sel = null; renderGraph(); }
+  if (k === 'gm') { S.gm = +e.target.value; S.sel = null; renderGraph(); }
   if (k === 'w') { S.wdays = +e.target.value; S.wsel = null; renderWeight(); }
   if (k === 'ly') { S.ly = +e.target.value; S.lm = 0; renderList(); window.scrollTo(0, 0); }
   if (k === 'lm') { S.lm = +e.target.value; renderList(); window.scrollTo(0, 0); }
